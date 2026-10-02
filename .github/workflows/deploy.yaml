@@ -88,6 +88,10 @@ jobs:
     needs: [detect-changes, test]
     if: github.event_name != 'pull_request' && needs.detect-changes.outputs.lambdas != '[]'
     runs-on: ubuntu-latest
+    # id-token: write lets the job request an OIDC token to assume the AWS role
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -108,14 +112,13 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: "us-east-2"
 
       - name: Deploy to Lambda
         run: |
           FUNCTION_NAME="${{ fromJSON(env.FUNCTION_NAMES)[matrix.lambda] }}"
           aws lambda update-function-code \
             --function-name "$FUNCTION_NAME" \
-            --zip-file fileb://code.zip
+            --zip-file fileb://code.zip 
           aws lambda wait function-updated --function-name "$FUNCTION_NAME"
