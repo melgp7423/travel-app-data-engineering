@@ -113,12 +113,12 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: "us-east-2"
+          aws-region: us-east-2
 
       - name: Deploy to Lambda
         run: |
           FUNCTION_NAME="${{ fromJSON(env.FUNCTION_NAMES)[matrix.lambda] }}"
           aws lambda update-function-code \
             --function-name "$FUNCTION_NAME" \
-            --zip-file fileb://code.zip 
+            --zip-file fileb://code.zip
           aws lambda wait function-updated --function-name "$FUNCTION_NAME"
