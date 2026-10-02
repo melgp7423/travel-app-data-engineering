@@ -1,28 +1,121 @@
-name: Deploy Lambda Function
+name: CI/CD - Lambda Functions
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # manual run deploys every lambda
+
+env:
+  AWS_REGION: us-east-2
+  # Maps each folder in src/lambdas/ to its AWS Lambda function ARN
+  FUNCTION_NAMES: >-
+    {
+      "ingest_exchange_rates": "arn:aws:lambda:us-east-2:075996947402:function:ingestExchangeRates",
+      "ingest_airplane_ticket_rates": "arn:aws:lambda:us-east-2:075996947402:function:ingestAirplaneTicketRates",
+      "ingest_hotel_room_rates": "arn:aws:lambda:us-east-2:075996947402:function:ingestHotelRoomRates",
+      "ingest_meal_rates": "arn:aws:lambda:us-east-2:075996947402:function:ingestMealRates"
+    }
 
 jobs:
-  deploy:
+  # Figure out which lambdas changed so only those get tested/deployed
+  detect-changes:
     runs-on: ubuntu-latest
-
+    outputs:
+      lambdas: ${{ steps.set.outputs.lambdas }}
     steps:
-      - uses: actions/checkout@v2
-      - name: Install zip tool
-        uses: montudor/action-zip@v1
-      - name: Create Zip file for Lambda function
-        run: zip -r code.zip .
-      - name: AWS CLI v2
-        uses: imehedi/actions-awscli-v2@latest
-        with:
-          args: "lambda update-function-code \
-            --function-name arn:aws:lambda:us-east-2:075996947402:function:ingestExchangeRates \
-            --zip-file fileb://code.zip"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: "us-east-2"
+      - uses: actions/checkout@v4
 
-# Figure out how to change YAML file to do a CI for each separate lambda function
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            ingest_exchange_rates:
+              - 'src/lambdas/ingest_exchange_rates/**'
+              - 'tests/lambdas/test_ingest_exchange_rates.py'
+              - '.github/workflows/deploy.yaml'
+            ingest_airplane_ticket_rates:
+              - 'src/lambdas/ingest_airplane_ticket_rates/**'
+              - 'tests/lambdas/test_ingest_airplane_ticket_rates.py'
+              - '.github/workflows/deploy.yaml'
+            ingest_hotel_room_rates:
+              - 'src/lambdas/ingest_hotel_room_rates/**'
+              - 'tests/lambdas/test_ingest_hotel_room_rates.py'
+              - '.github/workflows/deploy.yaml'
+            ingest_meal_rates:
+              - 'src/lambdas/ingest_meal_rates/**'
+              - 'tests/lambdas/test_ingest_meal_rates.py'
+              - '.github/workflows/deploy.yaml'
+
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo 'lambdas=["ingest_exchange_rates","ingest_airplane_ticket_rates","ingest_hotel_room_rates","ingest_meal_rates"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'lambdas=${{ steps.filter.outputs.changes }}' >> "$GITHUB_OUTPUT"
+          fi
+
+  # CI: install deps and run tests for each changed lambda
+  test:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.lambdas != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lambda: ${{ fromJSON(needs.detect-changes.outputs.lambdas) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          pip install pytest
+          pip install -r src/lambdas/${{ matrix.lambda }}/requirements.txt
+
+      - name: Run tests
+        env:
+          PYTHONPATH: src
+        # exit code 5 = no tests collected; allowed until tests are written
+        run: pytest tests/lambdas/test_${{ matrix.lambda }}.py || [ $? -eq 5 ]
+
+  # CD: package and deploy each changed lambda (only on main, never on PRs)
+  deploy:
+    needs: [detect-changes, test]
+    if: github.event_name != 'pull_request' && needs.detect-changes.outputs.lambdas != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lambda: ${{ fromJSON(needs.detect-changes.outputs.lambdas) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Build deployment package
+        run: |
+          mkdir package
+          pip install -r src/lambdas/${{ matrix.lambda }}/requirements.txt -t package
+          cp -r src/lambdas/${{ matrix.lambda }}/. package/
+          cd package && zip -r ../code.zip .
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to Lambda
+        run: |
+          FUNCTION_NAME="${{ fromJSON(env.FUNCTION_NAMES)[matrix.lambda] }}"
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --zip-file fileb://code.zip
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
