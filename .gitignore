@@ -17,6 +17,7 @@ credentials
 credentials.json
 secrets.json
 *secret*.json
+
 # IAM policy JSONs that mention secrets are fine to commit
 !iam/**/*secret*.json
 .aws/
